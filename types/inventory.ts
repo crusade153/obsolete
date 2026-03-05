@@ -6,7 +6,7 @@
 export interface MovementRecord {
   MATNR: string; // 제품코드 (Material Code) - 8자리 (1~6 시작)
   MAKTX: string; // 제품명 (Material Description)
-  BUDAT: string; // 전기일 (Posting Date, ex: '20250101') - 🚨 활동일 추적의 핵심
+  BUDAT: string; // 전기일 (Posting Date, ex: '20250101')
   ERFMG: number; // 사용수량 (Quantity, 감소는 -, 증가는 +)
   ERFME: string; // 단위 (Unit, ex: 'BOX', 'EA', 'KG')
   BWART: string; // 이동유형 (Movement Type - 101, 261, 601 등)
@@ -18,13 +18,12 @@ export interface MovementRecord {
 export interface BomRecord {
   MATNR: string;   // 모품목코드 (Parent Material Code)
   MATNR_T: string; // 모품목명 (Parent Material Name)
-  IDNRK: string;   // 자품목코드 (Child Material Code) - 🚨 BOM 등록(사용처) 유무 확인용
+  IDNRK: string;   // 자품목코드 (Child Material Code)
   IDNRK_T: string; // 자품목코드명 (Child Material Name)
 }
 
 /**
  * 3. 자재 그룹 분류 (코드 첫 자리 기준 상수화)
- * 하드코딩 방지를 위해 Enum으로 관리합니다.
  */
 export enum MaterialGroup {
   RAW = '1',       // 원자재
@@ -37,7 +36,6 @@ export enum MaterialGroup {
 
 /**
  * 4. 주요 이동유형 (Movement Types)
- * 로직 분기를 위해 명확히 정의합니다.
  */
 export enum MovementType {
   GR_PROD_PURCH = '101', // 생산/구매 입고 (+)
@@ -51,9 +49,12 @@ export enum MovementType {
 
 /**
  * 5. 프론트엔드/시트에 뿌려질 최종 분석 결과 타입
- * 서버에서 연산을 마치고 클라이언트로 내려줄 정제된 데이터 규격입니다.
  */
 export interface InventoryAnalysisResult {
+  // ✅ 새롭게 추가된 플랜트, 저장위치 데이터
+  plant: string;              // 플랜트 (ex: '1021')
+  storageLocation: string;    // 저장위치 (ex: '2101')
+  
   materialCode: string;       // 제품코드
   materialName: string;       // 제품명
   materialGroup: string;      // 자재구분 (원자재, 반제품 등)
