@@ -34,6 +34,8 @@ export enum MaterialGroup {
   TRADE = '6',     // 상품
 }
 
+export type ViewType = 'ALL' | 'PROD' | 'LOGIS'; // 부문 필터용 타입
+
 /**
  * 4. 주요 이동유형 (Movement Types)
  */
@@ -51,7 +53,6 @@ export enum MovementType {
  * 5. 프론트엔드/시트에 뿌려질 최종 분석 결과 타입
  */
 export interface InventoryAnalysisResult {
-  // ✅ 새롭게 추가된 플랜트, 저장위치 데이터
   plant: string;              // 플랜트 (ex: '1021')
   storageLocation: string;    // 저장위치 (ex: '2101')
   
@@ -62,8 +63,19 @@ export interface InventoryAnalysisResult {
   unit: string;               // 단위
   unitPrice: number;          // 단가
   totalAmount: number;        // 금액
-  lastActivityDate: string | null; // 최종 활동일 (YYYY-MM-DD)
-  inactiveDays: number | null;     // 미활동 일수 (오늘 기준)
-  hasBomUsage: boolean;       // BOM 내 존재 여부
-  status: '정상' | '부진' | '불용' | '분석불가'; // 최종 상태 판별
+  
+  // 🚀 팩트 기반 데이터 필드
+  firstReceiptDate: string | null;   // 최초 입고일 (창고 체류 기간 파악용)
+  lastReceiptDate: string | null;    // 마지막 입고일
+  lastReceiptQty: number;            // 마지막 입고 수량
+  
+  lastIssueDate: string | null;      // 마지막 출고일
+  lastMonthConsumeQty: number;       // 마지막 출고 발생 월의 총 소비수량
+  last6MonthsIssueQty: number;       // 최근 6개월 누적 출고량
+  monthlyAvgIssueQty: number;        // 월평균 출고량 (6개월 누적 / 6)
+  
+  inactiveDays: number | null;       // 미활동 일수 (2026-02-28 기준)
+  coverageMonths: number | null;     // 재고 소진 가능 월수 (현재재고 / 월평균소비량)
+  
+  bomStatus: 'O' | 'X' | 'N/A';      // BOM 내 존재 여부 (제품/상품은 N/A)
 }
