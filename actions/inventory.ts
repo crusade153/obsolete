@@ -51,7 +51,7 @@ export async function fetchAvailablePlants(): Promise<string[]> {
 export async function fetchInventoryData(
   plantFilter?: string, 
   groupFilter?: string, 
-  viewFilter?: string // 🚀 새로 추가된 부문 필터 파라미터
+  viewFilter?: string 
 ): Promise<{ success: boolean; data?: InventoryAnalysisResult[]; error?: string }> {
   try {
     let allData: any[] = [];
@@ -69,14 +69,11 @@ export async function fetchInventoryData(
         query = query.eq('plant', plantFilter);
       }
 
-      // 💡 3단계 필터링 로직: 하위 그룹 선택 시 구체적 코드 적용, 없을 시 부문 필터 적용
       if (groupFilter && groupFilter !== 'ALL') {
         query = query.like('material_code', `${groupFilter}%`);
       } else if (viewFilter === 'PROD') {
-        // 생산 부문: 1, 2, 3, 4로 시작하는 자재만
         query = query.or('material_code.like.1%,material_code.like.2%,material_code.like.3%,material_code.like.4%');
       } else if (viewFilter === 'LOGIS') {
-        // 물류 부문: 5, 6으로 시작하는 제품/상품만
         query = query.or('material_code.like.5%,material_code.like.6%');
       }
 
@@ -124,7 +121,7 @@ export async function fetchInventoryData(
     const materialCodes = inventoryData.map(item => item.materialCode);
     const DATASET_NAME = 'harim_sap_bi'; 
 
-    // 💡 팩트 데이터를 한 번의 쿼리로 모두 추출하는 강력한 SQL
+    // 💡 제품(5)/상품(6)에 생산 투입(261) 및 취소(262) 완벽 반영!
     const mb51Query = `
       WITH MovementData AS (
         SELECT 
@@ -135,7 +132,8 @@ export async function fetchInventoryData(
           CASE 
             WHEN BWART IN ('101', '102') THEN 'RECEIPT'
             WHEN SUBSTR(MATNR, 1, 1) IN ('1', '2', '3', '4') AND BWART IN ('261', '262') THEN 'ISSUE'
-            WHEN SUBSTR(MATNR, 1, 1) IN ('5', '6') AND BWART IN ('601', '602', '611') THEN 'ISSUE'
+            -- 🚀 수정포인트: 제품(5)/상품(6)의 출고 기준에 601, 602, 611과 더불어 자가소비용 261, 262 추가
+            WHEN SUBSTR(MATNR, 1, 1) IN ('5', '6') AND BWART IN ('601', '602', '611', '261', '262') THEN 'ISSUE'
             ELSE 'OTHER' 
           END AS mov_type,
           CASE 

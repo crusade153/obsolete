@@ -160,7 +160,6 @@ export default async function DashboardPage({
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
           <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
             <p className="text-sm font-bold text-gray-500">조회 품목 수</p>
-            {/* 💡 toLocaleString('ko-KR') 적용 완료 */}
             <p className="text-3xl font-black text-gray-900 mt-2">{totalItems.toLocaleString('ko-KR')} <span className="text-lg font-medium text-gray-500">건</span></p>
           </div>
           <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 border-l-4 border-l-blue-500">
@@ -186,7 +185,6 @@ export default async function DashboardPage({
         </div>
 
         {/* --- 데이터 테이블 섹션 --- */}
-        {/* 💡 Hydration Error를 일으켰던 불필요한 DOM key 속성 제거 완벽 조치 */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
           <div className="overflow-x-auto w-full">
             <table className="w-full text-left border-collapse min-w-max">
