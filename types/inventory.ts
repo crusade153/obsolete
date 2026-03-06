@@ -70,6 +70,7 @@ export interface InventoryAnalysisResult {
   lastReceiptQty: number;            // 마지막 입고 수량
   
   lastIssueDate: string | null;      // 마지막 출고일
+  lastIssueQty: number;              // 🚀 추가: 마지막 출고 수량
   lastMonthConsumeQty: number;       // 마지막 출고 발생 월의 총 소비수량
   last6MonthsIssueQty: number;       // 최근 6개월 누적 출고량
   monthlyAvgIssueQty: number;        // 월평균 출고량 (6개월 누적 / 6)

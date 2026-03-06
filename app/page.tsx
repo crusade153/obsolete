@@ -195,7 +195,7 @@ export default async function DashboardPage({
                   <th className="p-3 font-bold text-right">현재 재고(금액)</th>
                   <th className="p-3 font-bold text-center">최초 입고일</th>
                   <th className="p-3 font-bold text-right">최근 입고 (수량)</th>
-                  <th className="p-3 font-bold text-center">마지막 출고일</th>
+                  <th className="p-3 font-bold text-right">마지막 출고 (수량)</th>
                   <th className="p-3 font-bold text-right bg-blue-50/50">최근6개월출고(월평균)</th>
                   <th className="p-3 font-bold text-center">회전(월)</th>
                   <th className="p-3 font-bold text-center bg-red-50/50">미활동(일)</th>
@@ -203,7 +203,8 @@ export default async function DashboardPage({
                 </tr>
               </thead>
               <tbody className="text-sm divide-y divide-gray-100">
-                {data.slice(0, 100).map((item) => (
+                {/* 🚀 성능 최적화를 위해 렌더링을 상위 30건으로 제한 */}
+                {data.slice(0, 30).map((item) => (
                   <tr key={`${item.plant}-${item.storageLocation}-${item.materialCode}`} className="hover:bg-gray-50 transition-colors text-gray-700">
                     <td className="p-3 font-medium text-gray-500 text-xs">{item.plant} / {item.materialGroup}</td>
                     <td className="p-3">
@@ -219,7 +220,10 @@ export default async function DashboardPage({
                       <div>{item.lastReceiptDate || '-'}</div>
                       {item.lastReceiptQty > 0 && <div className="text-gray-400">({item.lastReceiptQty.toLocaleString('ko-KR')} {item.unit})</div>}
                     </td>
-                    <td className="p-3 text-center text-blue-600 font-semibold text-xs">{item.lastIssueDate || '-'}</td>
+                    <td className="p-3 text-right text-xs">
+                      <div className="text-blue-600 font-semibold">{item.lastIssueDate || '-'}</div>
+                      {item.lastIssueQty > 0 && <div className="text-gray-400">({item.lastIssueQty.toLocaleString('ko-KR')} {item.unit})</div>}
+                    </td>
                     
                     <td className="p-3 text-right text-xs bg-blue-50/30">
                       {item.last6MonthsIssueQty > 0 ? (
@@ -256,9 +260,16 @@ export default async function DashboardPage({
               </tbody>
             </table>
           </div>
-          {data.length > 100 && (
-            <div className="p-4 text-center text-sm font-medium text-gray-500 bg-gray-50 border-t border-gray-200">
-              * 미활동일이 가장 오래된 악성 재고 상위 100건만 렌더링되었습니다. (전체 {data.length.toLocaleString('ko-KR')}건은 엑셀 다운로드로 확인하세요)
+          {/* 🚀 브라우저 로딩 속도 향상을 위해 안내 툴팁 강화 */}
+          {data.length > 30 && (
+            <div className="p-6 text-center bg-orange-50/50 border-t border-gray-200">
+              <p className="text-sm font-bold text-orange-600 mb-1 flex items-center justify-center gap-2">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                화면 로딩 최적화를 위해 악성 재고 상위 30건만 렌더링되었습니다.
+              </p>
+              <p className="text-sm text-gray-600 mt-2">
+                전체 데이터 <strong>({data.length.toLocaleString('ko-KR')}건)</strong> 분석 및 확인이 필요하신 경우 우측 상단의 <strong className="text-green-600">엑셀 다운로드</strong> 버튼을 이용해 주세요!
+              </p>
             </div>
           )}
         </div>

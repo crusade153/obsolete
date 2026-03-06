@@ -92,7 +92,7 @@ export async function fetchInventoryData(
     if (allData.length === 0) return { success: true, data: [] };
 
     const inventoryData: InventoryAnalysisResult[] = allData.map((item) => {
-      const codeStr = String(item.material_code || '');
+      const codeStr = String(item.material_code || '').replace(/^0+/, '').trim();
       const firstChar = codeStr.substring(0, 1);
       
       return {
@@ -109,6 +109,7 @@ export async function fetchInventoryData(
         lastReceiptDate: null,
         lastReceiptQty: 0,
         lastIssueDate: null,
+        lastIssueQty: 0,
         lastMonthConsumeQty: 0,
         last6MonthsIssueQty: 0,
         monthlyAvgIssueQty: 0,
@@ -118,87 +119,129 @@ export async function fetchInventoryData(
       };
     });
 
-    const materialCodes = inventoryData.map(item => item.materialCode);
+    const materialCodes = inventoryData.map(item => String(item.materialCode).replace(/^0+/, '').trim());
     const DATASET_NAME = 'harim_sap_bi'; 
 
-    // 💡 제품(5)/상품(6)에 생산 투입(261) 및 취소(262) 완벽 반영!
+    // 🚀 원천 문제 해결: LGORT(창고)를 제거하고 플랜트(WERKS) 단위로 모든 재고 활동 병합
     const mb51Query = `
-      WITH MovementData AS (
+      WITH RawMovement AS (
+        SELECT DISTINCT
+          LTRIM(TRIM(CAST(MATNR AS STRING)), '0') AS MATNR, 
+          TRIM(CAST(WERKS AS STRING)) AS WERKS, 
+          -- 💡 더 이상 LGORT에 얽매여 과거 기록을 놓치지 않도록 LGORT 제외
+          MBLNR, 
+          ZEILE, 
+          REPLACE(REPLACE(REPLACE(TRIM(CAST(BUDAT AS STRING)), '.', ''), '-', ''), '/', '') AS BUDAT, 
+          TRIM(CAST(BWART AS STRING)) AS BWART, 
+          CAST(REPLACE(REPLACE(COALESCE(CAST(ERFMG AS STRING), '0'), '-', ''), ',', '') AS FLOAT64) AS abs_erfmg
+        FROM \`${process.env.GOOGLE_PROJECT_ID}.${DATASET_NAME}.MM_MB51\`
+        WHERE LTRIM(TRIM(CAST(MATNR AS STRING)), '0') IN UNNEST(@codes)
+      ),
+      MovementData AS (
         SELECT 
-          MATNR,
-          BUDAT,
-          SUBSTR(BUDAT, 1, 6) as YYYYMM,
-          BWART,
+          MATNR, WERKS, BUDAT, SUBSTR(BUDAT, 1, 6) as YYYYMM, BWART,
+          -- 💡 사용자가 명시한 가장 정확하고 엄격한 이동유형 룰 유지
           CASE 
             WHEN BWART IN ('101', '102') THEN 'RECEIPT'
             WHEN SUBSTR(MATNR, 1, 1) IN ('1', '2', '3', '4') AND BWART IN ('261', '262') THEN 'ISSUE'
-            -- 🚀 수정포인트: 제품(5)/상품(6)의 출고 기준에 601, 602, 611과 더불어 자가소비용 261, 262 추가
-            WHEN SUBSTR(MATNR, 1, 1) IN ('5', '6') AND BWART IN ('601', '602', '611', '261', '262') THEN 'ISSUE'
+            WHEN SUBSTR(MATNR, 1, 1) IN ('5', '6') AND BWART IN ('601', '602', '261', '262') THEN 'ISSUE'
             ELSE 'OTHER' 
           END AS mov_type,
+          
           CASE 
-            WHEN BWART IN ('101') THEN ABS(ERFMG)
-            WHEN BWART IN ('102') THEN -ABS(ERFMG)
+            WHEN BWART = '101' THEN abs_erfmg
+            WHEN BWART = '102' THEN -abs_erfmg
             ELSE 0
           END AS receipt_qty,
+          
           CASE 
-            WHEN BWART IN ('261', '601', '611') THEN ABS(ERFMG)
-            WHEN BWART IN ('262', '602') THEN -ABS(ERFMG) 
+            WHEN SUBSTR(MATNR, 1, 1) IN ('1', '2', '3', '4') AND BWART = '261' THEN abs_erfmg
+            WHEN SUBSTR(MATNR, 1, 1) IN ('1', '2', '3', '4') AND BWART = '262' THEN -abs_erfmg
+            WHEN SUBSTR(MATNR, 1, 1) IN ('5', '6') AND BWART IN ('601', '261') THEN abs_erfmg
+            WHEN SUBSTR(MATNR, 1, 1) IN ('5', '6') AND BWART IN ('602', '262') THEN -abs_erfmg
             ELSE 0 
           END AS consume_qty
-        FROM \`${process.env.GOOGLE_PROJECT_ID}.${DATASET_NAME}.MM_MB51\`
-        WHERE MATNR IN UNNEST(@codes)
+        FROM RawMovement
       ),
-      AggregatedDates AS (
-        SELECT 
-          MATNR,
-          MIN(CASE WHEN mov_type = 'RECEIPT' THEN BUDAT END) as first_receipt_date,
-          MAX(CASE WHEN mov_type = 'RECEIPT' THEN BUDAT END) as last_receipt_date,
-          MAX(CASE WHEN mov_type = 'ISSUE' THEN BUDAT END) as last_issue_date
+      
+      -- 1️⃣ 입고 (RECEIPT)
+      DailyReceipt AS (
+        SELECT MATNR, WERKS, BUDAT, SUM(receipt_qty) as daily_qty
         FROM MovementData
-        GROUP BY MATNR
+        WHERE mov_type = 'RECEIPT'
+        GROUP BY MATNR, WERKS, BUDAT
+        HAVING SUM(receipt_qty) > 0 
       ),
-      LastReceiptQty AS (
-        SELECT m.MATNR, SUM(m.receipt_qty) as last_receipt_qty
-        FROM MovementData m
-        JOIN AggregatedDates a ON m.MATNR = a.MATNR AND m.BUDAT = a.last_receipt_date
-        WHERE m.mov_type = 'RECEIPT'
-        GROUP BY m.MATNR
+      RankedReceipt AS (
+        SELECT MATNR, WERKS, BUDAT, daily_qty,
+               ROW_NUMBER() OVER(PARTITION BY MATNR, WERKS ORDER BY BUDAT ASC) as rn_first,
+               ROW_NUMBER() OVER(PARTITION BY MATNR, WERKS ORDER BY BUDAT DESC) as rn_last
+        FROM DailyReceipt
       ),
-      LastMonthConsumption AS (
-        SELECT m.MATNR, SUM(m.consume_qty) as last_issue_month_qty
-        FROM MovementData m
-        JOIN AggregatedDates a ON m.MATNR = a.MATNR AND m.YYYYMM = SUBSTR(a.last_issue_date, 1, 6)
-        WHERE m.mov_type = 'ISSUE'
-        GROUP BY m.MATNR
+      FirstReceipt AS (
+        SELECT MATNR, WERKS, BUDAT as first_receipt_date
+        FROM RankedReceipt WHERE rn_first = 1
       ),
-      Last6MonthsConsumption AS (
-        SELECT m.MATNR, SUM(m.consume_qty) as last_6m_issue_qty
-        FROM MovementData m
-        WHERE m.mov_type = 'ISSUE' 
-          AND m.BUDAT >= '20250901' -- 2026-02-28 기준 6개월 전
-          AND m.BUDAT <= '20260228'
-        GROUP BY m.MATNR
+      LastReceipt AS (
+        SELECT MATNR, WERKS, BUDAT as last_receipt_date, daily_qty as last_receipt_qty
+        FROM RankedReceipt WHERE rn_last = 1
+      ),
+      
+      -- 2️⃣ 출고 (ISSUE)
+      DailyIssue AS (
+        SELECT MATNR, WERKS, BUDAT, SUM(consume_qty) as daily_qty
+        FROM MovementData
+        WHERE mov_type = 'ISSUE'
+        GROUP BY MATNR, WERKS, BUDAT
+        HAVING SUM(consume_qty) > 0
+      ),
+      RankedIssue AS (
+        SELECT MATNR, WERKS, BUDAT, daily_qty,
+               ROW_NUMBER() OVER(PARTITION BY MATNR, WERKS ORDER BY BUDAT DESC) as rn_last
+        FROM DailyIssue
+      ),
+      LastIssue AS (
+        SELECT MATNR, WERKS, BUDAT as last_issue_date, daily_qty as last_issue_qty
+        FROM RankedIssue WHERE rn_last = 1
+      ),
+      
+      -- 3️⃣ 회전율 계산을 위한 기간별 소비량 추출 (당월 & 최근 6개월 명확히 분리)
+      RecentConsumption AS (
+        SELECT 
+          MATNR, WERKS,
+          -- 💡 2026년 2월을 당월(Current Month)로 픽스하여 출고량 합산
+          SUM(CASE WHEN YYYYMM = '202602' THEN consume_qty ELSE 0 END) as current_month_issue_qty,
+          -- 💡 최근 6개월 (2025.09.01 ~ 2026.02.28) 누적 출고량
+          SUM(CASE WHEN BUDAT >= '20250901' AND BUDAT <= '20260228' THEN consume_qty ELSE 0 END) as last_6m_issue_qty
+        FROM MovementData
+        WHERE mov_type = 'ISSUE'
+        GROUP BY MATNR, WERKS
+      ),
+      
+      BaseGroup AS (
+        SELECT DISTINCT MATNR, WERKS FROM MovementData
       )
       
       SELECT 
-        a.MATNR,
-        a.first_receipt_date,
-        a.last_receipt_date,
-        a.last_issue_date,
-        COALESCE(r.last_receipt_qty, 0) as last_receipt_qty,
-        COALESCE(l.last_issue_month_qty, 0) as last_issue_month_qty,
-        COALESCE(s.last_6m_issue_qty, 0) as last_6m_issue_qty
-      FROM AggregatedDates a
-      LEFT JOIN LastReceiptQty r ON a.MATNR = r.MATNR
-      LEFT JOIN LastMonthConsumption l ON a.MATNR = l.MATNR
-      LEFT JOIN Last6MonthsConsumption s ON a.MATNR = s.MATNR
+        b.MATNR, b.WERKS,
+        fr.first_receipt_date,
+        lr.last_receipt_date,
+        COALESCE(lr.last_receipt_qty, 0) as last_receipt_qty,
+        li.last_issue_date,
+        COALESCE(li.last_issue_qty, 0) as last_issue_qty,
+        COALESCE(rc.current_month_issue_qty, 0) as current_month_issue_qty,
+        COALESCE(rc.last_6m_issue_qty, 0) as last_6m_issue_qty
+      FROM BaseGroup b
+      LEFT JOIN FirstReceipt fr ON b.MATNR = fr.MATNR AND b.WERKS = fr.WERKS
+      LEFT JOIN LastReceipt lr ON b.MATNR = lr.MATNR AND b.WERKS = lr.WERKS
+      LEFT JOIN LastIssue li ON b.MATNR = li.MATNR AND b.WERKS = li.WERKS
+      LEFT JOIN RecentConsumption rc ON b.MATNR = rc.MATNR AND b.WERKS = rc.WERKS
     `;
     
     const stpoQuery = `
-      SELECT DISTINCT IDNRK 
+      SELECT DISTINCT LTRIM(TRIM(CAST(IDNRK AS STRING)), '0') AS IDNRK
       FROM \`${process.env.GOOGLE_PROJECT_ID}.${DATASET_NAME}.PP_STPO\`
-      WHERE IDNRK IN UNNEST(@codes)
+      WHERE LTRIM(TRIM(CAST(IDNRK AS STRING)), '0') IN UNNEST(@codes)
     `;
 
     let mb51Results: any[] = [];
@@ -215,25 +258,29 @@ export async function fetchInventoryData(
       console.error("🚨 BigQuery 조회 에러:", bqError.message);
     }
 
-    const mb51Map = new Map(mb51Results.map(r => [r.MATNR, r]));
+    // 💡 키 매핑에서도 저장위치(LGORT)를 배제하고 플랜트 단위로 연결
+    const mb51Map = new Map(mb51Results.map(r => [`${r.MATNR}_${r.WERKS}`, r]));
     const bomUsageSet = new Set(stpoResults.map(r => r.IDNRK));
 
     const parseSAPDate = (sapDateStr: string | undefined | null) => {
-      if (!sapDateStr || sapDateStr.length !== 8) return null;
-      return `${sapDateStr.substring(0, 4)}-${sapDateStr.substring(4, 6)}-${sapDateStr.substring(6, 8)}`;
+      const str = String(sapDateStr || '');
+      if (str.length !== 8) return null;
+      return `${str.substring(0, 4)}-${str.substring(4, 6)}-${str.substring(6, 8)}`;
     };
 
-    // 💡 2026-02-28 고정 기준일
     const referenceDate = new Date('2026-02-28T00:00:00Z');
 
     inventoryData.forEach(item => {
-      const mb51Data = mb51Map.get(item.materialCode);
+      const mCode = String(item.materialCode).replace(/^0+/, '').trim();
+      const plant = String(item.plant).trim();
       
-      // 💡 BOM 상태 판별 (제품/상품은 무조건 N/A 처리)
+      const uniqueKey = `${mCode}_${plant}`;
+      const mb51Data = mb51Map.get(uniqueKey);
+      
       if (item.materialGroup === '제품' || item.materialGroup === '상품') {
         item.bomStatus = 'N/A';
       } else {
-        item.bomStatus = bomUsageSet.has(item.materialCode) ? 'O' : 'X';
+        item.bomStatus = bomUsageSet.has(mCode) ? 'O' : 'X';
       }
 
       if (mb51Data) {
@@ -241,12 +288,25 @@ export async function fetchInventoryData(
         item.lastReceiptDate = parseSAPDate(mb51Data.last_receipt_date);
         item.lastReceiptQty = Number(mb51Data.last_receipt_qty || 0);
         
+        // 🔥 이제 24년이 아닌 가장 마지막 출고일(예: 26.2.24)이 무조건 매핑됩니다.
         item.lastIssueDate = parseSAPDate(mb51Data.last_issue_date);
-        item.lastMonthConsumeQty = Number(mb51Data.last_issue_month_qty || 0);
+        item.lastIssueQty = Number(mb51Data.last_issue_qty || 0); 
+        
+        // 당월(26년 2월) 및 누적 출고량
+        item.lastMonthConsumeQty = Number(mb51Data.current_month_issue_qty || 0);
         item.last6MonthsIssueQty = Number(mb51Data.last_6m_issue_qty || 0);
         item.monthlyAvgIssueQty = Number((item.last6MonthsIssueQty / 6).toFixed(1));
 
-        // 💡 미활동 일수 (2026-02-28 기준)
+        // 🚀 당월 및 최근 6개월 회전율 계산 로직 추가 (출고수량 / 기말수량 * 100)
+        // 화면/엑셀에서 활용할 수 있도록 객체에 주입합니다.
+        (item as any).turnoverRate1M = item.currentQuantity > 0 
+          ? Number(((item.lastMonthConsumeQty / item.currentQuantity) * 100).toFixed(1)) 
+          : (item.lastMonthConsumeQty > 0 ? 999 : 0);
+          
+        (item as any).turnoverRate6M = item.currentQuantity > 0 
+          ? Number(((item.last6MonthsIssueQty / item.currentQuantity) * 100).toFixed(1)) 
+          : (item.last6MonthsIssueQty > 0 ? 999 : 0);
+
         const targetDateStr = item.lastIssueDate || item.lastReceiptDate;
         if (targetDateStr) {
           const targetDate = new Date(`${targetDateStr}T00:00:00Z`);
@@ -255,11 +315,10 @@ export async function fetchInventoryData(
           item.inactiveDays = days > 0 ? days : 0; 
         }
 
-        // 💡 재고 회전 월수 (월평균 출고량 기준)
         if (item.monthlyAvgIssueQty > 0) {
            item.coverageMonths = Number((item.currentQuantity / item.monthlyAvgIssueQty).toFixed(1));
         } else {
-           item.coverageMonths = 999; // 무한대 (소비 없음)
+           item.coverageMonths = 999; 
         }
       }
     });

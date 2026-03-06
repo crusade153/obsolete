@@ -15,11 +15,11 @@ export default function ExcelDownloadButton({ data }: Props) {
         return;
       }
 
-      // 1. 엑셀(CSV) 헤더 정의 (팩트 데이터 위주)
+      // 1. 엑셀(CSV) 헤더 정의 (팩트 데이터 위주, 출고수량 추가)
       const headers = [
         '플랜트', '분류', '자재코드', '제품명', '기말수량', '단위', '단가', '재고금액',
         '최초입고일', '마지막입고일', '마지막입고수량', 
-        '마지막출고일', '최근6개월누적출고량', '월평균출고량', 
+        '마지막출고일', '마지막출고수량', '최근6개월누적출고량', '월평균출고량', 
         '재고회전(개월수)', '미활동일수(2026-02-28기준)', 'BOM존재여부'
       ];
 
@@ -42,6 +42,7 @@ export default function ExcelDownloadButton({ data }: Props) {
           Number(item.lastReceiptQty || 0),
           
           String(item.lastIssueDate || '-'),
+          Number(item.lastIssueQty || 0),  // 🚀 마지막 출고 수량 추가
           Number(item.last6MonthsIssueQty || 0),
           Number(item.monthlyAvgIssueQty || 0),
           
