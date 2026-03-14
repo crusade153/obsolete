@@ -4,6 +4,7 @@
 import { supabase } from '@/lib/supabase';
 import { bigquery } from '@/lib/bigquery';
 import { InventoryAnalysisResult, MaterialGroup, ViewType } from '@/types/inventory';
+import { unstable_cache } from 'next/cache';
 
 const getGroupName = (code: string) => {
   switch (code) {
@@ -17,35 +18,52 @@ const getGroupName = (code: string) => {
   }
 };
 
-export async function fetchAvailablePlants(): Promise<string[]> {
-  try {
-    let allPlants: string[] = [];
-    let isFetching = true;
-    let step = 0;
-    const limit = 1000;
+export const fetchAvailablePlants = unstable_cache(
+  async (): Promise<string[]> => {
+    try {
+      let allPlants: string[] = [];
+      let isFetching = true;
+      let step = 0;
+      const limit = 1000;
 
-    while (isFetching) {
-      const from = step * limit;
-      const to = from + limit - 1;
-      const { data, error } = await supabase.from('ending_inventory').select('plant').range(from, to);
-      
-      if (error) throw error;
-      
-      if (data && data.length > 0) {
-        allPlants = allPlants.concat(data.map(d => d.plant));
-        step++;
-        if (data.length < limit) isFetching = false;
-      } else {
-        isFetching = false;
+      while (isFetching) {
+        const from = step * limit;
+        const to = from + limit - 1;
+        const { data, error } = await supabase.from('ending_inventory').select('plant').range(from, to);
+        
+        if (error) throw error;
+        
+        if (data && data.length > 0) {
+          allPlants = allPlants.concat(data.map(d => d.plant));
+          step++;
+          if (data.length < limit) isFetching = false;
+        } else {
+          isFetching = false;
+        }
       }
-    }
 
-    const uniquePlants = Array.from(new Set(allPlants.filter(Boolean)));
-    return uniquePlants.sort();
-  } catch (error) {
-    console.error('[ERROR] fetchAvailablePlants:', error);
-    return [];
-  }
+      const uniquePlants = Array.from(new Set(allPlants.filter(Boolean)));
+      return uniquePlants.sort();
+    } catch (error) {
+      console.error('[ERROR] fetchAvailablePlants:', error);
+      return [];
+    }
+  },
+  ['available-plants-cache'],
+  { revalidate: 3600, tags: ['inventory'] }
+);
+
+const globalCache = global as unknown as {
+  __INVENTORY_DATA_CACHE__?: {
+    [key: string]: {
+      timestamp: number;
+      data: { success: boolean; data?: InventoryAnalysisResult[]; error?: string };
+    };
+  };
+};
+
+if (!globalCache.__INVENTORY_DATA_CACHE__) {
+  globalCache.__INVENTORY_DATA_CACHE__ = {};
 }
 
 export async function fetchInventoryData(
@@ -53,6 +71,16 @@ export async function fetchInventoryData(
   groupFilter?: string, 
   viewFilter?: string 
 ): Promise<{ success: boolean; data?: InventoryAnalysisResult[]; error?: string }> {
+  
+  const cacheKey = `${plantFilter || 'ALL'}_${groupFilter || 'ALL'}_${viewFilter || 'ALL'}`;
+  const CACHE_TTL = 3600 * 1000; 
+  const now = Date.now();
+
+  const cached = globalCache.__INVENTORY_DATA_CACHE__![cacheKey];
+  if (cached && (now - cached.timestamp < CACHE_TTL)) {
+    return cached.data;
+  }
+
   try {
     let allData: any[] = [];
     let isFetching = true;
@@ -89,22 +117,56 @@ export async function fetchInventoryData(
       }
     }
 
-    if (allData.length === 0) return { success: true, data: [] };
+    if (allData.length === 0) {
+      const emptyResult = { success: true, data: [] };
+      globalCache.__INVENTORY_DATA_CACHE__![cacheKey] = { timestamp: now, data: emptyResult };
+      return emptyResult;
+    }
 
-    const inventoryData: InventoryAnalysisResult[] = allData.map((item) => {
-      const codeStr = String(item.material_code || '').replace(/^0+/, '').trim();
-      const firstChar = codeStr.substring(0, 1);
+    // 🚀 1. 저장위치/배치 등으로 나뉘어진 "동일 플랜트 + 동일 자재코드" 병합 로직 (핵심 수정)
+    const aggregatedMap = new Map<string, any>();
+
+    for (const row of allData) {
+      const codeStr = String(row.material_code || '').replace(/^0+/, '').trim();
+      const plant = row.plant || 'UNKNOWN';
+      const key = `${plant}_${codeStr}`; // 플랜트와 자재코드의 조합을 고유 키로 설정
+
+      if (!aggregatedMap.has(key)) {
+        aggregatedMap.set(key, {
+          material_code: codeStr,
+          material_name: row.material_name || '',
+          plant: plant,
+          storage_location: row.storage_location || '',
+          inventory_quantity: Number(row.inventory_quantity || 0),
+          unit: row.unit || '',
+          unit_price: Number(row.unit_price || 0),
+          inventory_amount: Number(row.inventory_amount || 0),
+        });
+      } else {
+        // 이미 존재하는 키라면 수량과 금액을 누적 합산합니다.
+        const existing = aggregatedMap.get(key);
+        existing.inventory_quantity += Number(row.inventory_quantity || 0);
+        existing.inventory_amount += Number(row.inventory_amount || 0);
+        existing.storage_location = '통합'; // 합쳐진 재고임을 명시
+      }
+    }
+
+    // 병합이 완료된 순수 데이터를 배열로 변환
+    const aggregatedRawData = Array.from(aggregatedMap.values());
+
+    const inventoryData: InventoryAnalysisResult[] = aggregatedRawData.map((item) => {
+      const firstChar = item.material_code.substring(0, 1);
       
       return {
-        materialCode: codeStr,
-        materialName: item.material_name || '',
+        materialCode: item.material_code,
+        materialName: item.material_name,
         materialGroup: getGroupName(firstChar),
-        plant: item.plant || '',
-        storageLocation: item.storage_location || '',
-        currentQuantity: Number(item.inventory_quantity || 0),
-        unit: item.unit || '',
-        unitPrice: Number(item.unit_price || 0),
-        totalAmount: Number(item.inventory_amount || 0),
+        plant: item.plant,
+        storageLocation: item.storage_location,
+        currentQuantity: item.inventory_quantity,
+        unit: item.unit,
+        unitPrice: item.unit_price,
+        totalAmount: item.inventory_amount,
         firstReceiptDate: null,
         lastReceiptDate: null,
         lastReceiptQty: 0,
@@ -119,10 +181,9 @@ export async function fetchInventoryData(
       };
     });
 
-    const materialCodes = inventoryData.map(item => String(item.materialCode).replace(/^0+/, '').trim());
+    const materialCodes = inventoryData.map(item => item.materialCode);
     const DATASET_NAME = 'harim_sap_bi'; 
 
-    // 🚀 원천 문제 2차 해결: WERKS(플랜트) 조건마저 완전히 제거하여 '전사(Company-wide) 기준 자재 통합 이력'으로 승격
     const mb51Query = `
       WITH RawMovement AS (
         SELECT DISTINCT
@@ -138,7 +199,6 @@ export async function fetchInventoryData(
       MovementData AS (
         SELECT 
           MATNR, BUDAT, SUBSTR(BUDAT, 1, 6) as YYYYMM, BWART,
-          -- 💡 자재별 이동유형 룰 유지 (플랜트에 구애받지 않고 모든 활동 포착)
           CASE 
             WHEN BWART IN ('101', '102') THEN 'RECEIPT'
             WHEN SUBSTR(MATNR, 1, 1) IN ('1', '2', '3', '4') AND BWART IN ('261', '262') THEN 'ISSUE'
@@ -162,7 +222,6 @@ export async function fetchInventoryData(
         FROM RawMovement
       ),
       
-      -- 1️⃣ 전사 통합 입고 (RECEIPT)
       DailyReceipt AS (
         SELECT MATNR, BUDAT, SUM(receipt_qty) as daily_qty
         FROM MovementData
@@ -185,7 +244,6 @@ export async function fetchInventoryData(
         FROM RankedReceipt WHERE rn_last = 1
       ),
       
-      -- 2️⃣ 전사 통합 출고 (ISSUE) - 1021 재고여도 1022 출고를 가져옴
       DailyIssue AS (
         SELECT MATNR, BUDAT, SUM(consume_qty) as daily_qty
         FROM MovementData
@@ -203,7 +261,6 @@ export async function fetchInventoryData(
         FROM RankedIssue WHERE rn_last = 1
       ),
       
-      -- 3️⃣ 전사 통합 회전율 계산을 위한 소비량 추출
       RecentConsumption AS (
         SELECT 
           MATNR,
@@ -254,7 +311,6 @@ export async function fetchInventoryData(
       console.error("🚨 BigQuery 조회 에러:", bqError.message);
     }
 
-    // 💡 키 매핑: 플랜트 의존성 완전 제거, 오직 자재코드(MATNR)만으로 1:1 매핑
     const mb51Map = new Map(mb51Results.map(r => [r.MATNR, r]));
     const bomUsageSet = new Set(stpoResults.map(r => r.IDNRK));
 
@@ -267,9 +323,7 @@ export async function fetchInventoryData(
     const referenceDate = new Date('2026-02-28T00:00:00Z');
 
     inventoryData.forEach(item => {
-      const mCode = String(item.materialCode).replace(/^0+/, '').trim();
-      
-      // 💡 플랜트 상관없이 자재코드만으로 글로벌 이력을 가져옴
+      const mCode = item.materialCode;
       const mb51Data = mb51Map.get(mCode);
       
       if (item.materialGroup === '제품' || item.materialGroup === '상품') {
@@ -290,14 +344,6 @@ export async function fetchInventoryData(
         item.last6MonthsIssueQty = Number(mb51Data.last_6m_issue_qty || 0);
         item.monthlyAvgIssueQty = Number((item.last6MonthsIssueQty / 6).toFixed(1));
 
-        (item as any).turnoverRate1M = item.currentQuantity > 0 
-          ? Number(((item.lastMonthConsumeQty / item.currentQuantity) * 100).toFixed(1)) 
-          : (item.lastMonthConsumeQty > 0 ? 999 : 0);
-          
-        (item as any).turnoverRate6M = item.currentQuantity > 0 
-          ? Number(((item.last6MonthsIssueQty / item.currentQuantity) * 100).toFixed(1)) 
-          : (item.last6MonthsIssueQty > 0 ? 999 : 0);
-
         const targetDateStr = item.lastIssueDate || item.lastReceiptDate;
         if (targetDateStr) {
           const targetDate = new Date(`${targetDateStr}T00:00:00Z`);
@@ -306,6 +352,7 @@ export async function fetchInventoryData(
           item.inactiveDays = days > 0 ? days : 0; 
         }
 
+        // 🚀 이제 currentQuantity가 완벽히 합산되어 있으므로 커버리지 팩터가 정상적으로 계산됩니다.
         if (item.monthlyAvgIssueQty > 0) {
            item.coverageMonths = Number((item.currentQuantity / item.monthlyAvgIssueQty).toFixed(1));
         } else {
@@ -314,7 +361,14 @@ export async function fetchInventoryData(
       }
     });
 
-    return { success: true, data: inventoryData };
+    const resultPayload = { success: true, data: inventoryData };
+    
+    globalCache.__INVENTORY_DATA_CACHE__![cacheKey] = {
+      timestamp: now,
+      data: resultPayload
+    };
+
+    return resultPayload;
 
   } catch (error: any) {
     console.error('[ERROR] fetchInventoryData:', error.message);
