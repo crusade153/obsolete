@@ -3,8 +3,22 @@ import { fetchInventoryData, fetchAvailablePlants } from '@/actions/inventory';
 import { MaterialGroup, ViewType } from '@/types/inventory';
 import Link from 'next/link';
 import ExcelDownloadButton from '@/components/ExcelDownloadButton';
-import SearchBar from '@/components/SearchBar'; 
+import SearchBar from '@/components/SearchBar';
 import { Suspense } from 'react'; // 🚀 Hydration 에러 수정을 위해 추가
+
+// ─────────────────────────────────────────────
+// 📅 판단 기준일 옵션 (날짜 추가/수정은 여기서만)
+// ─────────────────────────────────────────────
+const REFERENCE_DATE_OPTIONS = [
+  { label: '2025/11/30', value: '20251130' },
+  { label: '2025/12/31', value: '20251231' },
+  { label: '2026/01/31', value: '20260131' },
+  { label: '2026/02/28', value: '20260228' },
+  { label: '2026/03/31', value: '20260331' },
+  { label: '2026/04/30', value: '20260430' },
+  { label: '2026/05/31', value: '20260531' },
+];
+const DEFAULT_REF_DATE = '20260228';
 
 // 🚀 Hydration 이슈를 예방하기 위해 SortableHeader를 별도의 컴포넌트로 명확히 분리
 const SortableHeader = ({ title, columnKey, align = 'left', className = '', currentSort, currentOrder, buildUrl }: any) => {
@@ -34,11 +48,12 @@ export default async function DashboardPage({
   const sortCol = params.sort || 'inactiveDays';
   const sortDir = params.order || 'desc';
   const currentPage = Number(params.page) || 1;
-  const searchKeyword = params.search || ''; 
-  const PAGE_SIZE = 50; 
-  
+  const searchKeyword = params.search || '';
+  const currentRefDate = REFERENCE_DATE_OPTIONS.find(o => o.value === params.refDate)?.value || DEFAULT_REF_DATE;
+  const PAGE_SIZE = 50;
+
   const availablePlants = await fetchAvailablePlants();
-  const result = await fetchInventoryData(currentPlant, currentGroup, currentView);
+  const result = await fetchInventoryData(currentPlant, currentGroup, currentView, currentRefDate);
   
   if (!result.success) {
     return (
@@ -83,13 +98,14 @@ export default async function DashboardPage({
 
   const buildUrl = (updates: Record<string, string | number>) => {
     const newParams = new URLSearchParams();
+    if (currentRefDate !== DEFAULT_REF_DATE) newParams.set('refDate', currentRefDate);
     if (currentView !== 'ALL') newParams.set('view', currentView);
     if (currentPlant !== 'ALL') newParams.set('plant', currentPlant);
     if (currentGroup !== 'ALL') newParams.set('group', currentGroup);
     if (sortCol !== 'inactiveDays') newParams.set('sort', sortCol);
     if (sortDir !== 'desc') newParams.set('order', sortDir);
     if (currentPage !== 1) newParams.set('page', String(currentPage));
-    if (searchKeyword) newParams.set('search', searchKeyword); 
+    if (searchKeyword) newParams.set('search', searchKeyword);
 
     Object.entries(updates).forEach(([k, v]) => newParams.set(k, String(v)));
     return `/?${newParams.toString()}`;
@@ -146,6 +162,28 @@ export default async function DashboardPage({
             <ExcelDownloadButton data={data} />
           </div>
         </header>
+
+        {/* 📅 판단 기준일 선택 */}
+        <div className="mb-6 bg-amber-50 p-4 rounded-xl shadow-sm border border-amber-200">
+          <p className="text-xs font-bold text-amber-700 mb-3 uppercase tracking-wider">
+            📅 판단 기준일 &nbsp;—&nbsp; 선택한 날짜 기준으로 <strong>최근 6개월 출고·미활동일·180일/365일 미출고 금액</strong>이 모두 재계산됩니다
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {REFERENCE_DATE_OPTIONS.map((opt) => (
+              <Link
+                key={opt.value}
+                href={buildUrl({ refDate: opt.value, page: 1 })}
+                className={`px-4 py-2 rounded-lg text-sm font-bold transition-all ${
+                  currentRefDate === opt.value
+                    ? 'bg-amber-500 text-white shadow-md ring-2 ring-amber-300'
+                    : 'bg-white text-amber-700 border border-amber-300 hover:bg-amber-100'
+                }`}
+              >
+                {opt.label}
+              </Link>
+            ))}
+          </div>
+        </div>
 
         <div className="mb-6 bg-white p-4 rounded-xl shadow-sm border border-gray-200">
           <p className="text-xs font-bold text-gray-400 mb-3 uppercase tracking-wider">Step 1. 부문 선택</p>

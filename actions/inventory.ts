@@ -66,13 +66,34 @@ if (!globalCache.__INVENTORY_DATA_CACHE__) {
   globalCache.__INVENTORY_DATA_CACHE__ = {};
 }
 
+function calcRefDateStrings(refDateStr: string) {
+  const year = parseInt(refDateStr.substring(0, 4));
+  const month = parseInt(refDateStr.substring(4, 6));
+  const refYYYYMM = refDateStr.substring(0, 6);
+
+  let startMonth = month - 5;
+  let startYear = year;
+  if (startMonth <= 0) {
+    startMonth += 12;
+    startYear -= 1;
+  }
+  const sixMonthsStartStr = `${startYear}${String(startMonth).padStart(2, '0')}01`;
+  const isoDate = `${refDateStr.substring(0, 4)}-${refDateStr.substring(4, 6)}-${refDateStr.substring(6, 8)}`;
+
+  return { refYYYYMM, sixMonthsStartStr, isoDate };
+}
+
 export async function fetchInventoryData(
-  plantFilter?: string, 
-  groupFilter?: string, 
-  viewFilter?: string 
+  plantFilter?: string,
+  groupFilter?: string,
+  viewFilter?: string,
+  refDate?: string
 ): Promise<{ success: boolean; data?: InventoryAnalysisResult[]; error?: string }> {
-  
-  const cacheKey = `${plantFilter || 'ALL'}_${groupFilter || 'ALL'}_${viewFilter || 'ALL'}`;
+
+  const refDateStr = refDate || '20260228';
+  const { refYYYYMM, sixMonthsStartStr, isoDate } = calcRefDateStrings(refDateStr);
+
+  const cacheKey = `${plantFilter || 'ALL'}_${groupFilter || 'ALL'}_${viewFilter || 'ALL'}_${refDateStr}`;
   const CACHE_TTL = 3600 * 1000; 
   const now = Date.now();
 
@@ -264,8 +285,8 @@ export async function fetchInventoryData(
       RecentConsumption AS (
         SELECT 
           MATNR,
-          SUM(CASE WHEN YYYYMM = '202602' THEN consume_qty ELSE 0 END) as current_month_issue_qty,
-          SUM(CASE WHEN BUDAT >= '20250901' AND BUDAT <= '20260228' THEN consume_qty ELSE 0 END) as last_6m_issue_qty
+          SUM(CASE WHEN YYYYMM = '${refYYYYMM}' THEN consume_qty ELSE 0 END) as current_month_issue_qty,
+          SUM(CASE WHEN BUDAT >= '${sixMonthsStartStr}' AND BUDAT <= '${refDateStr}' THEN consume_qty ELSE 0 END) as last_6m_issue_qty
         FROM MovementData
         WHERE mov_type = 'ISSUE'
         GROUP BY MATNR
@@ -320,7 +341,7 @@ export async function fetchInventoryData(
       return `${str.substring(0, 4)}-${str.substring(4, 6)}-${str.substring(6, 8)}`;
     };
 
-    const referenceDate = new Date('2026-02-28T00:00:00Z');
+    const referenceDate = new Date(`${isoDate}T00:00:00Z`);
 
     inventoryData.forEach(item => {
       const mCode = item.materialCode;
