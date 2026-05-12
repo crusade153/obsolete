@@ -3,7 +3,7 @@
 
 import { supabase } from '@/lib/supabase';
 import { bigquery } from '@/lib/bigquery';
-import { InventoryAnalysisResult, MaterialGroup, ViewType } from '@/types/inventory';
+import { InventoryAnalysisResult, MaterialGroup, PlanActualComparisonResult, ViewType } from '@/types/inventory';
 import { unstable_cache } from 'next/cache';
 
 const getGroupName = (code: string) => {
@@ -60,10 +60,20 @@ const globalCache = global as unknown as {
       data: { success: boolean; data?: InventoryAnalysisResult[]; error?: string };
     };
   };
+  __PLAN_ACTUAL_DATA_CACHE__?: {
+    [key: string]: {
+      timestamp: number;
+      data: { success: boolean; data?: PlanActualComparisonResult[]; error?: string };
+    };
+  };
 };
 
 if (!globalCache.__INVENTORY_DATA_CACHE__) {
   globalCache.__INVENTORY_DATA_CACHE__ = {};
+}
+
+if (!globalCache.__PLAN_ACTUAL_DATA_CACHE__) {
+  globalCache.__PLAN_ACTUAL_DATA_CACHE__ = {};
 }
 
 function calcRefDateStrings(refDateStr: string) {
@@ -81,6 +91,23 @@ function calcRefDateStrings(refDateStr: string) {
   const isoDate = `${refDateStr.substring(0, 4)}-${refDateStr.substring(4, 6)}-${refDateStr.substring(6, 8)}`;
 
   return { refYYYYMM, sixMonthsStartStr, isoDate };
+}
+
+function calcPlanPeriodStrings(refDateStr: string) {
+  const year = parseInt(refDateStr.substring(0, 4));
+  const month = parseInt(refDateStr.substring(4, 6));
+  let startMonth = month - 23;
+  let startYear = year;
+
+  while (startMonth <= 0) {
+    startMonth += 12;
+    startYear -= 1;
+  }
+
+  return {
+    planPeriodStart: `${startYear}${String(startMonth).padStart(2, '0')}01`,
+    planPeriodEnd: refDateStr,
+  };
 }
 
 export async function fetchInventoryData(
@@ -394,5 +421,134 @@ export async function fetchInventoryData(
   } catch (error: any) {
     console.error('[ERROR] fetchInventoryData:', error.message);
     return { success: false, error: '데이터를 분석하는 중 에러가 발생했습니다.' };
+  }
+}
+
+export async function fetchPlanActualData(
+  plantFilter?: string,
+  groupFilter?: string,
+  viewFilter?: string,
+  refDate?: string
+): Promise<{ success: boolean; data?: PlanActualComparisonResult[]; error?: string }> {
+  const refDateStr = refDate || '20260228';
+  const { planPeriodStart, planPeriodEnd } = calcPlanPeriodStrings(refDateStr);
+  const cacheKey = `${plantFilter || 'ALL'}_${groupFilter || 'ALL'}_${viewFilter || 'ALL'}_${planPeriodStart}_${planPeriodEnd}`;
+  const CACHE_TTL = 3600 * 1000;
+  const now = Date.now();
+
+  const cached = globalCache.__PLAN_ACTUAL_DATA_CACHE__![cacheKey];
+  if (cached && (now - cached.timestamp < CACHE_TTL)) {
+    return cached.data;
+  }
+
+  try {
+    const inventoryResult = await fetchInventoryData(plantFilter, groupFilter, viewFilter, refDateStr);
+    if (!inventoryResult.success) {
+      return { success: false, error: inventoryResult.error };
+    }
+
+    const inventoryData = inventoryResult.data || [];
+    if (inventoryData.length === 0) {
+      const emptyResult = { success: true, data: [] };
+      globalCache.__PLAN_ACTUAL_DATA_CACHE__![cacheKey] = { timestamp: now, data: emptyResult };
+      return emptyResult;
+    }
+
+    const inventoryByMaterial = new Map<string, InventoryAnalysisResult>();
+    for (const item of inventoryData) {
+      const existing = inventoryByMaterial.get(item.materialCode);
+      if (!existing) {
+        inventoryByMaterial.set(item.materialCode, { ...item });
+      } else {
+        existing.currentQuantity += item.currentQuantity;
+        existing.totalAmount += item.totalAmount;
+        existing.plant = existing.plant === item.plant ? existing.plant : '복수';
+      }
+    }
+
+    const materialInventoryData = Array.from(inventoryByMaterial.values());
+    const materialCodes = materialInventoryData.map(item => item.materialCode).filter(Boolean);
+    const DATASET_NAME = 'harim_sap_bi';
+
+    const planActualQuery = `
+      WITH RawPlan AS (
+        SELECT
+          LTRIM(TRIM(CAST(MATNR AS STRING)), '0') AS MATNR,
+          TRIM(CAST(MAKTX AS STRING)) AS MAKTX,
+          CAST(REPLACE(REPLACE(COALESCE(CAST(ERFMG AS STRING), '0'), ',', ''), '-', '') AS FLOAT64) AS planned_qty,
+          CAST(REPLACE(REPLACE(COALESCE(CAST(MENGE AS STRING), '0'), ',', ''), '-', '') AS FLOAT64) AS actual_qty,
+          REPLACE(REPLACE(REPLACE(TRIM(CAST(GSTRP AS STRING)), '.', ''), '-', ''), '/', '') AS GSTRP
+        FROM \`${process.env.GOOGLE_PROJECT_ID}.${DATASET_NAME}.PP_ZASPPR1160_B\`
+        WHERE LTRIM(TRIM(CAST(MATNR AS STRING)), '0') IN UNNEST(@codes)
+      )
+      SELECT
+        MATNR,
+        ANY_VALUE(MAKTX) AS MAKTX,
+        SUM(planned_qty) AS planned_qty,
+        SUM(actual_qty) AS actual_qty
+      FROM RawPlan
+      WHERE GSTRP BETWEEN @planPeriodStart AND @planPeriodEnd
+      GROUP BY MATNR
+    `;
+
+    let planActualRows: any[] = [];
+    try {
+      const [response] = await bigquery.query({
+        query: planActualQuery,
+        params: { codes: materialCodes, planPeriodStart, planPeriodEnd },
+      });
+      planActualRows = response;
+    } catch (bqError: any) {
+      console.error('🚨 PP_ZASPPR1160_B BigQuery 조회 에러:', bqError.message);
+      throw bqError;
+    }
+
+    const planMap = new Map(planActualRows.map(row => [row.MATNR, row]));
+    const comparisonData: PlanActualComparisonResult[] = materialInventoryData.map((item) => {
+      const planRow = planMap.get(item.materialCode);
+      const plannedQuantity = Number(planRow?.planned_qty || 0);
+      const actualQuantity = Number(planRow?.actual_qty || 0);
+      const varianceQuantity = actualQuantity - plannedQuantity;
+      const achievementRate = plannedQuantity > 0 ? Number(((actualQuantity / plannedQuantity) * 100).toFixed(1)) : null;
+      const remainingPlanQuantity = Math.max(plannedQuantity - actualQuantity, 0);
+      const stockToPlanRate = plannedQuantity > 0 ? Number(((item.currentQuantity / plannedQuantity) * 100).toFixed(1)) : null;
+
+      let utilizationStatus: PlanActualComparisonResult['utilizationStatus'] = 'NO_PLAN';
+      if (plannedQuantity > 0 && achievementRate !== null) {
+        if (achievementRate < 90) utilizationStatus = 'UNDER';
+        else if (achievementRate > 110) utilizationStatus = 'OVER';
+        else utilizationStatus = 'ON_TRACK';
+      }
+
+      return {
+        plant: item.plant,
+        materialCode: item.materialCode,
+        materialName: planRow?.MAKTX || item.materialName,
+        materialGroup: item.materialGroup,
+        currentQuantity: item.currentQuantity,
+        unit: item.unit,
+        totalAmount: item.totalAmount,
+        planPeriodStart,
+        planPeriodEnd,
+        plannedQuantity,
+        actualQuantity,
+        varianceQuantity,
+        achievementRate,
+        remainingPlanQuantity,
+        stockToPlanRate,
+        utilizationStatus,
+      };
+    });
+
+    const resultPayload = { success: true, data: comparisonData };
+    globalCache.__PLAN_ACTUAL_DATA_CACHE__![cacheKey] = {
+      timestamp: now,
+      data: resultPayload,
+    };
+
+    return resultPayload;
+  } catch (error: any) {
+    console.error('[ERROR] fetchPlanActualData:', error.message);
+    return { success: false, error: '계획 대비 실적 데이터를 분석하는 중 에러가 발생했습니다.' };
   }
 }

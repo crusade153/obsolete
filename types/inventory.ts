@@ -80,3 +80,26 @@ export interface InventoryAnalysisResult {
   
   bomStatus: 'O' | 'X' | 'N/A';      // BOM 내 존재 여부 (제품/상품은 N/A)
 }
+
+/**
+ * 6. 생산/자원 계획 대비 실적 비교 결과
+ * PP_ZASPPR1160_B의 계획/실적을 현재 기말재고 품목 기준으로 연결합니다.
+ */
+export interface PlanActualComparisonResult {
+  plant: string;
+  materialCode: string;
+  materialName: string;
+  materialGroup: string;
+  currentQuantity: number;
+  unit: string;
+  totalAmount: number;
+  planPeriodStart: string;
+  planPeriodEnd: string;
+  plannedQuantity: number;
+  actualQuantity: number;
+  varianceQuantity: number;
+  achievementRate: number | null;
+  remainingPlanQuantity: number;
+  stockToPlanRate: number | null;
+  utilizationStatus: 'ON_TRACK' | 'UNDER' | 'OVER' | 'NO_PLAN';
+}
