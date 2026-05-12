@@ -20,6 +20,7 @@ const PAGE_SIZE = 50;
 
 type MainTab = 'inventory' | 'plan';
 type StatusFilter = 'ALL' | PlanActualComparisonResult['utilizationStatus'];
+type PlanPeriodMonths = 12 | 24;
 
 const getDefaultRefDate = () => {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -33,6 +34,20 @@ const getDefaultRefDate = () => {
   const currentMonthOption = REFERENCE_DATE_OPTIONS.find(option => option.value.startsWith(currentMonth));
 
   return currentMonthOption?.value || REFERENCE_DATE_OPTIONS[REFERENCE_DATE_OPTIONS.length - 1].value;
+};
+
+const calcPlanPeriodStartLabel = (refDate: string, periodMonths: PlanPeriodMonths) => {
+  const year = Number(refDate.substring(0, 4));
+  const month = Number(refDate.substring(4, 6));
+  let startMonth = month - (periodMonths - 1);
+  let startYear = year;
+
+  while (startMonth <= 0) {
+    startMonth += 12;
+    startYear -= 1;
+  }
+
+  return `${startYear}/${String(startMonth).padStart(2, '0')}/01`;
 };
 
 const SortableHeader = ({ title, columnKey, align = 'left', className = '', currentSort, currentOrder, buildUrl }: any) => {
@@ -80,21 +95,12 @@ export default async function DashboardPage({
   const currentStatus: StatusFilter = ['ON_TRACK', 'UNDER', 'OVER', 'NO_PLAN'].includes(params.status || '')
     ? params.status as StatusFilter
     : 'ALL';
+  const currentPlanPeriod: PlanPeriodMonths = params.period === '12' ? 12 : 24;
   const searchKeyword = params.search || '';
   const currentPage = Number(params.page) || 1;
   const defaultRefDate = getDefaultRefDate();
   const currentRefDate = REFERENCE_DATE_OPTIONS.find(o => o.value === params.refDate)?.value || defaultRefDate;
-  const planPeriodStartLabel = (() => {
-    const year = Number(currentRefDate.substring(0, 4));
-    const month = Number(currentRefDate.substring(4, 6));
-    let startMonth = month - 23;
-    let startYear = year;
-    while (startMonth <= 0) {
-      startMonth += 12;
-      startYear -= 1;
-    }
-    return `${startYear}/${String(startMonth).padStart(2, '0')}/01`;
-  })();
+  const planPeriodStartLabel = calcPlanPeriodStartLabel(currentRefDate, currentPlanPeriod);
   const planPeriodEndLabel = `${currentRefDate.substring(0, 4)}/${currentRefDate.substring(4, 6)}/${currentRefDate.substring(6, 8)}`;
   const defaultSort = currentTab === 'plan' ? 'achievementRate' : 'inactiveDays';
   const sortCol = params.sort || defaultSort;
@@ -105,7 +111,7 @@ export default async function DashboardPage({
     ? await fetchInventoryData(currentPlant, currentGroup, currentView, currentRefDate)
     : null;
   const planResult = currentTab === 'plan'
-    ? await fetchPlanActualData(currentPlant, currentGroup, currentView, currentRefDate)
+    ? await fetchPlanActualData(currentPlant, currentGroup, currentView, currentRefDate, currentPlanPeriod)
     : null;
 
   const activeResult = currentTab === 'inventory' ? inventoryResult : planResult;
@@ -187,6 +193,7 @@ export default async function DashboardPage({
     if (currentPlant !== 'ALL') newParams.set('plant', currentPlant);
     if (currentGroup !== 'ALL') newParams.set('group', currentGroup);
     if (currentTab === 'plan' && currentStatus !== 'ALL') newParams.set('status', currentStatus);
+    if (currentTab === 'plan' && currentPlanPeriod !== 24) newParams.set('period', String(currentPlanPeriod));
     if (sortCol !== defaultSort) newParams.set('sort', sortCol);
     if (sortDir !== 'desc') newParams.set('order', sortDir);
     if (currentPage !== 1) newParams.set('page', String(currentPage));
@@ -197,11 +204,15 @@ export default async function DashboardPage({
       if (k === 'status' && v === 'ALL') {
         newParams.delete('status');
       }
+      if (k === 'period' && Number(v) === 24) {
+        newParams.delete('period');
+      }
       if (k === 'tab') {
         newParams.delete('sort');
         newParams.delete('order');
         if (v === 'inventory') {
           newParams.delete('status');
+          newParams.delete('period');
         }
       }
     });
@@ -237,6 +248,10 @@ export default async function DashboardPage({
     { label: '미달', value: 'UNDER', count: statusCounts.UNDER },
     { label: '초과', value: 'OVER', count: statusCounts.OVER },
     { label: '계획 없음', value: 'NO_PLAN', count: statusCounts.NO_PLAN },
+  ];
+  const planPeriodTabs: Array<{ label: string; value: PlanPeriodMonths }> = [
+    { label: '1년 기준', value: 12 },
+    { label: '2년 기준', value: 24 },
   ];
 
   return (
@@ -282,7 +297,7 @@ export default async function DashboardPage({
 
         <div className="mb-6 bg-amber-50 p-4 rounded-xl shadow-sm border border-amber-200">
           <p className="text-xs font-bold text-amber-700 mb-3 uppercase tracking-wider">
-            판단 기준일: 재고 활동은 선택일 기준, 계획 대비 실적은 최근 24개월({planPeriodStartLabel}~{planPeriodEndLabel}) 기준으로 계산됩니다
+            판단 기준일: 재고 활동은 선택일 기준, 계획 대비 실적은 최근 {currentPlanPeriod}개월({planPeriodStartLabel}~{planPeriodEndLabel}) 기준으로 계산됩니다
           </p>
           <div className="flex flex-wrap gap-2">
             {REFERENCE_DATE_OPTIONS.map((opt) => (
@@ -300,6 +315,27 @@ export default async function DashboardPage({
             ))}
           </div>
         </div>
+
+        {currentTab === 'plan' && (
+          <div className="mb-6 bg-white p-4 rounded-xl shadow-sm border border-gray-200">
+            <p className="text-xs font-bold text-gray-400 mb-3 uppercase tracking-wider">계획/실적 기간 선택</p>
+            <div className="inline-flex gap-2 rounded-lg bg-gray-100 p-1">
+              {planPeriodTabs.map((tab) => (
+                <Link
+                  key={`period-${tab.value}`}
+                  href={buildUrl({ period: tab.value, page: 1 })}
+                  className={`px-5 py-2.5 rounded-md text-sm font-bold transition-all ${
+                    currentPlanPeriod === tab.value
+                      ? 'bg-gray-900 text-white shadow-sm'
+                      : 'text-gray-600 hover:bg-white'
+                  }`}
+                >
+                  {tab.label}
+                </Link>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="mb-6 bg-white p-4 rounded-xl shadow-sm border border-gray-200">
           <p className="text-xs font-bold text-gray-400 mb-3 uppercase tracking-wider">Step 1. 부문 선택</p>
@@ -404,11 +440,11 @@ export default async function DashboardPage({
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
-              <p className="text-sm font-bold text-gray-500">2년 계획 수량</p>
+              <p className="text-sm font-bold text-gray-500">{currentPlanPeriod === 12 ? '1년' : '2년'} 계획 수량</p>
               <p className="text-3xl font-black text-gray-900 mt-2">{plannedTotal.toLocaleString('ko-KR')}</p>
             </div>
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 border-l-4 border-l-blue-500">
-              <p className="text-sm font-bold text-gray-500">2년 실적 수량</p>
+              <p className="text-sm font-bold text-gray-500">{currentPlanPeriod === 12 ? '1년' : '2년'} 실적 수량</p>
               <p className="text-3xl font-black text-gray-900 mt-2">{actualTotal.toLocaleString('ko-KR')}</p>
             </div>
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 border-l-4 border-l-green-500 bg-green-50/30">

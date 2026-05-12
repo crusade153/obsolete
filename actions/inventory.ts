@@ -93,10 +93,11 @@ function calcRefDateStrings(refDateStr: string) {
   return { refYYYYMM, sixMonthsStartStr, isoDate };
 }
 
-function calcPlanPeriodStrings(refDateStr: string) {
+function calcPlanPeriodStrings(refDateStr: string, periodMonths = 24) {
   const year = parseInt(refDateStr.substring(0, 4));
   const month = parseInt(refDateStr.substring(4, 6));
-  let startMonth = month - 23;
+  const normalizedPeriod = periodMonths === 12 ? 12 : 24;
+  let startMonth = month - (normalizedPeriod - 1);
   let startYear = year;
 
   while (startMonth <= 0) {
@@ -428,11 +429,13 @@ export async function fetchPlanActualData(
   plantFilter?: string,
   groupFilter?: string,
   viewFilter?: string,
-  refDate?: string
+  refDate?: string,
+  periodMonths = 24
 ): Promise<{ success: boolean; data?: PlanActualComparisonResult[]; error?: string }> {
   const refDateStr = refDate || '20260228';
-  const { planPeriodStart, planPeriodEnd } = calcPlanPeriodStrings(refDateStr);
-  const cacheKey = `${plantFilter || 'ALL'}_${groupFilter || 'ALL'}_${viewFilter || 'ALL'}_${planPeriodStart}_${planPeriodEnd}`;
+  const normalizedPeriod = periodMonths === 12 ? 12 : 24;
+  const { planPeriodStart, planPeriodEnd } = calcPlanPeriodStrings(refDateStr, normalizedPeriod);
+  const cacheKey = `${plantFilter || 'ALL'}_${groupFilter || 'ALL'}_${viewFilter || 'ALL'}_${normalizedPeriod}_${planPeriodStart}_${planPeriodEnd}`;
   const CACHE_TTL = 3600 * 1000;
   const now = Date.now();
 
