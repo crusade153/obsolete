@@ -88,6 +88,9 @@ export default async function DashboardPage({
   searchParams: Promise<{ [key: string]: string | undefined }>;
 }) {
   const params = await searchParams;
+  const currentQueryString = new URLSearchParams(
+    Object.entries(params).filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+  ).toString();
   const currentTab = params.tab === 'plan' ? 'plan' : 'inventory';
   const currentView = (params.view as ViewType) || 'ALL';
   const currentPlant = params.plant || 'ALL';
@@ -272,8 +275,8 @@ export default async function DashboardPage({
               <SearchBar />
             </Suspense>
             <ExcelDownloadButton
-              data={currentTab === 'inventory' ? inventoryData : planData}
               mode={currentTab === 'inventory' ? 'inventory' : 'plan'}
+              queryString={currentQueryString}
             />
           </div>
         </header>

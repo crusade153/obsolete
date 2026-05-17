@@ -1,10 +1,17 @@
 // actions/inventory.ts
-'use server';
 
 import { supabase } from '@/lib/supabase';
 import { bigquery } from '@/lib/bigquery';
 import { InventoryAnalysisResult, MaterialGroup, PlanActualComparisonResult, ViewType } from '@/types/inventory';
 import { unstable_cache } from 'next/cache';
+import { gzipSync, gunzipSync } from 'node:zlib';
+
+type InventoryDataResponse = { success: boolean; data?: InventoryAnalysisResult[]; error?: string };
+type PlanActualDataResponse = { success: boolean; data?: PlanActualComparisonResult[]; error?: string };
+
+const packCachePayload = (payload: unknown) => gzipSync(JSON.stringify(payload)).toString('base64');
+const unpackCachePayload = <T,>(payload: string): T =>
+  JSON.parse(gunzipSync(Buffer.from(payload, 'base64')).toString('utf8')) as T;
 
 const getGroupName = (code: string) => {
   switch (code) {
@@ -111,12 +118,12 @@ function calcPlanPeriodStrings(refDateStr: string, periodMonths = 24) {
   };
 }
 
-export async function fetchInventoryData(
+async function fetchInventoryDataUncached(
   plantFilter?: string,
   groupFilter?: string,
   viewFilter?: string,
   refDate?: string
-): Promise<{ success: boolean; data?: InventoryAnalysisResult[]; error?: string }> {
+): Promise<InventoryDataResponse> {
 
   const refDateStr = refDate || '20260228';
   const { refYYYYMM, sixMonthsStartStr, isoDate } = calcRefDateStrings(refDateStr);
@@ -140,7 +147,10 @@ export async function fetchInventoryData(
       const from = step * limit;
       const to = from + limit - 1;
 
-      let query = supabase.from('ending_inventory').select('*').range(from, to);
+      let query = supabase
+        .from('ending_inventory')
+        .select('plant,material_code,material_name,storage_location,inventory_quantity,unit,unit_price,inventory_amount')
+        .range(from, to);
       
       if (plantFilter && plantFilter !== 'ALL') {
         query = query.eq('plant', plantFilter);
@@ -244,6 +254,7 @@ export async function fetchInventoryData(
           CAST(REPLACE(REPLACE(COALESCE(CAST(ERFMG AS STRING), '0'), '-', ''), ',', '') AS FLOAT64) AS abs_erfmg
         FROM \`${process.env.GOOGLE_PROJECT_ID}.${DATASET_NAME}.MM_MB51\`
         WHERE LTRIM(TRIM(CAST(MATNR AS STRING)), '0') IN UNNEST(@codes)
+          AND REPLACE(REPLACE(REPLACE(TRIM(CAST(BUDAT AS STRING)), '.', ''), '-', ''), '/', '') <= @refDate
       ),
       MovementData AS (
         SELECT 
@@ -313,8 +324,8 @@ export async function fetchInventoryData(
       RecentConsumption AS (
         SELECT 
           MATNR,
-          SUM(CASE WHEN YYYYMM = '${refYYYYMM}' THEN consume_qty ELSE 0 END) as current_month_issue_qty,
-          SUM(CASE WHEN BUDAT >= '${sixMonthsStartStr}' AND BUDAT <= '${refDateStr}' THEN consume_qty ELSE 0 END) as last_6m_issue_qty
+          SUM(CASE WHEN YYYYMM = @refYYYYMM THEN consume_qty ELSE 0 END) as current_month_issue_qty,
+          SUM(CASE WHEN BUDAT >= @sixMonthsStart AND BUDAT <= @refDate THEN consume_qty ELSE 0 END) as last_6m_issue_qty
         FROM MovementData
         WHERE mov_type = 'ISSUE'
         GROUP BY MATNR
@@ -351,7 +362,7 @@ export async function fetchInventoryData(
 
     try {
       const [mb51Response, stpoResponse] = await Promise.all([
-        bigquery.query({ query: mb51Query, params: { codes: materialCodes } }),
+        bigquery.query({ query: mb51Query, params: { codes: materialCodes, refYYYYMM, sixMonthsStart: sixMonthsStartStr, refDate: refDateStr } }),
         bigquery.query({ query: stpoQuery, params: { codes: materialCodes } })
       ]);
       mb51Results = mb51Response[0];
@@ -425,13 +436,35 @@ export async function fetchInventoryData(
   }
 }
 
-export async function fetchPlanActualData(
+const fetchInventoryDataPacked = unstable_cache(
+  async (
+    plantFilter?: string,
+    groupFilter?: string,
+    viewFilter?: string,
+    refDate?: string
+  ) => packCachePayload(await fetchInventoryDataUncached(plantFilter, groupFilter, viewFilter, refDate)),
+  ['inventory-data-v2'],
+  { revalidate: 600, tags: ['inventory'] }
+);
+
+export async function fetchInventoryData(
+  plantFilter?: string,
+  groupFilter?: string,
+  viewFilter?: string,
+  refDate?: string
+): Promise<InventoryDataResponse> {
+  return unpackCachePayload<InventoryDataResponse>(
+    await fetchInventoryDataPacked(plantFilter, groupFilter, viewFilter, refDate)
+  );
+}
+
+async function fetchPlanActualDataUncached(
   plantFilter?: string,
   groupFilter?: string,
   viewFilter?: string,
   refDate?: string,
   periodMonths = 24
-): Promise<{ success: boolean; data?: PlanActualComparisonResult[]; error?: string }> {
+): Promise<PlanActualDataResponse> {
   const refDateStr = refDate || '20260228';
   const normalizedPeriod = periodMonths === 12 ? 12 : 24;
   const { planPeriodStart, planPeriodEnd } = calcPlanPeriodStrings(refDateStr, normalizedPeriod);
@@ -483,6 +516,7 @@ export async function fetchPlanActualData(
           REPLACE(REPLACE(REPLACE(TRIM(CAST(GSTRP AS STRING)), '.', ''), '-', ''), '/', '') AS GSTRP
         FROM \`${process.env.GOOGLE_PROJECT_ID}.${DATASET_NAME}.PP_ZASPPR1160_B\`
         WHERE LTRIM(TRIM(CAST(MATNR AS STRING)), '0') IN UNNEST(@codes)
+          AND REPLACE(REPLACE(REPLACE(TRIM(CAST(GSTRP AS STRING)), '.', ''), '-', ''), '/', '') BETWEEN @planPeriodStart AND @planPeriodEnd
       )
       SELECT
         MATNR,
@@ -490,7 +524,6 @@ export async function fetchPlanActualData(
         SUM(planned_qty) AS planned_qty,
         SUM(actual_qty) AS actual_qty
       FROM RawPlan
-      WHERE GSTRP BETWEEN @planPeriodStart AND @planPeriodEnd
       GROUP BY MATNR
     `;
 
@@ -554,4 +587,28 @@ export async function fetchPlanActualData(
     console.error('[ERROR] fetchPlanActualData:', error.message);
     return { success: false, error: '계획 대비 실적 데이터를 분석하는 중 에러가 발생했습니다.' };
   }
+}
+
+const fetchPlanActualDataPacked = unstable_cache(
+  async (
+    plantFilter?: string,
+    groupFilter?: string,
+    viewFilter?: string,
+    refDate?: string,
+    periodMonths = 24
+  ) => packCachePayload(await fetchPlanActualDataUncached(plantFilter, groupFilter, viewFilter, refDate, periodMonths)),
+  ['plan-actual-data-v2'],
+  { revalidate: 600, tags: ['inventory'] }
+);
+
+export async function fetchPlanActualData(
+  plantFilter?: string,
+  groupFilter?: string,
+  viewFilter?: string,
+  refDate?: string,
+  periodMonths = 24
+): Promise<PlanActualDataResponse> {
+  return unpackCachePayload<PlanActualDataResponse>(
+    await fetchPlanActualDataPacked(plantFilter, groupFilter, viewFilter, refDate, periodMonths)
+  );
 }
