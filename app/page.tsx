@@ -88,9 +88,6 @@ export default async function DashboardPage({
   searchParams: Promise<{ [key: string]: string | undefined }>;
 }) {
   const params = await searchParams;
-  const currentQueryString = new URLSearchParams(
-    Object.entries(params).filter((entry): entry is [string, string] => typeof entry[1] === 'string')
-  ).toString();
   const currentTab = params.tab === 'plan' ? 'plan' : 'inventory';
   const currentView = (params.view as ViewType) || 'ALL';
   const currentPlant = params.plant || 'ALL';
@@ -223,6 +220,20 @@ export default async function DashboardPage({
     return `/?${newParams.toString()}`;
   };
 
+  const downloadParams = new URLSearchParams();
+  downloadParams.set('refDate', currentRefDate);
+  downloadParams.set('view', currentView);
+  downloadParams.set('plant', currentPlant);
+  downloadParams.set('group', currentGroup);
+  downloadParams.set('sort', sortCol);
+  downloadParams.set('order', sortDir);
+  if (searchKeyword) downloadParams.set('search', searchKeyword);
+  if (currentTab === 'plan') {
+    downloadParams.set('tab', currentTab);
+    downloadParams.set('status', currentStatus);
+    downloadParams.set('period', String(currentPlanPeriod));
+  }
+
   const viewTabs = [
     { label: '전체 보기', value: 'ALL' },
     { label: '생산 부문 (원/부/포/반)', value: 'PROD' },
@@ -276,7 +287,7 @@ export default async function DashboardPage({
             </Suspense>
             <ExcelDownloadButton
               mode={currentTab === 'inventory' ? 'inventory' : 'plan'}
-              queryString={currentQueryString}
+              queryString={downloadParams.toString()}
             />
           </div>
         </header>

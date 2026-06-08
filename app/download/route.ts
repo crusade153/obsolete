@@ -5,7 +5,10 @@ import { NextRequest, NextResponse } from 'next/server';
 type DownloadMode = 'inventory' | 'plan';
 type StatusFilter = 'ALL' | PlanActualComparisonResult['utilizationStatus'];
 
-const escapeCsvCell = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+const escapeCsvCell = (value: unknown) => {
+  const text = String(value ?? '');
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+};
 
 const formatPeriodDate = (value: string | undefined) => {
   const str = String(value || '');
@@ -44,6 +47,27 @@ const buildCsvResponse = (filePrefix: string, headers: string[], rows: Array<Arr
   });
 };
 
+const sortRows = <T extends object>(rows: T[], sortCol: string, sortDir: string) => {
+  rows.sort((a, b) => {
+    const rowA = a as Record<string, string | number | null | undefined>;
+    const rowB = b as Record<string, string | number | null | undefined>;
+    let valA = rowA[sortCol];
+    let valB = rowB[sortCol];
+
+    if (valA === null || valA === undefined) valA = sortDir === 'asc' ? Infinity : -Infinity;
+    if (valB === null || valB === undefined) valB = sortDir === 'asc' ? Infinity : -Infinity;
+
+    if (valA < valB) return sortDir === 'asc' ? -1 : 1;
+    if (valA > valB) return sortDir === 'asc' ? 1 : -1;
+    return 0;
+  });
+};
+
+const formatCoverageMonths = (value: number | null) => {
+  if (value === null) return '-';
+  return value === 999 ? '무한대(소비없음)' : value;
+};
+
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const mode: DownloadMode = searchParams.get('mode') === 'plan' ? 'plan' : 'inventory';
@@ -52,6 +76,8 @@ export async function GET(request: NextRequest) {
   const view = (searchParams.get('view') as ViewType) || 'ALL';
   const refDate = searchParams.get('refDate') || undefined;
   const searchKeyword = searchParams.get('search') || '';
+  const sortCol = searchParams.get('sort') || (mode === 'plan' ? 'achievementRate' : 'inactiveDays');
+  const sortDir = searchParams.get('order') || 'desc';
 
   if (mode === 'plan') {
     const periodMonths = searchParams.get('period') === '12' ? 12 : 24;
@@ -68,6 +94,7 @@ export async function GET(request: NextRequest) {
     if (status !== 'ALL') {
       data = data.filter(item => item.utilizationStatus === status);
     }
+    sortRows(data, sortCol, sortDir);
 
     return buildCsvResponse(
       'plan_actual_analysis',
@@ -103,14 +130,16 @@ export async function GET(request: NextRequest) {
   }
 
   const data = (result.data || []).filter(matchesSearch(searchKeyword));
+  sortRows(data, sortCol, sortDir);
+  const inactiveHeaderRefDate = formatPeriodDate(refDate || '20260228');
 
   return buildCsvResponse(
-    'inventory_analysis',
+    '재고활동_히스토리_분석',
     [
-      'Plant', 'Group', 'Material Code', 'Material Name', 'Inventory Quantity', 'Unit', 'Unit Price', 'Inventory Amount',
-      'First Receipt Date', 'Last Receipt Date', 'Last Receipt Quantity',
-      'Last Issue Date', 'Last Issue Quantity', 'Last 6M Issue Quantity', 'Monthly Avg Issue Quantity',
-      'Coverage Months', 'Inactive Days', 'BOM Status',
+      '플랜트', '분류', '자재코드', '제품명', '기말수량', '단위', '단가', '재고금액',
+      '최초입고일', '마지막입고일', '마지막입고수량',
+      '마지막출고일', '마지막출고수량', '최근6개월누적출고량', '월평균출고량',
+      '재고회전(개월수)', `미활동일수(${inactiveHeaderRefDate}기준)`, 'BOM존재여부',
     ],
     data.map((item: InventoryAnalysisResult) => [
       item.plant,
@@ -128,7 +157,7 @@ export async function GET(request: NextRequest) {
       item.lastIssueQty,
       item.last6MonthsIssueQty,
       item.monthlyAvgIssueQty,
-      item.coverageMonths === 999 ? 'Infinite' : item.coverageMonths ?? '-',
+      formatCoverageMonths(item.coverageMonths),
       item.inactiveDays ?? '-',
       item.bomStatus,
     ])
